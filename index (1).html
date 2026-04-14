@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>GEDCOM Shared Individuals (Linked)</title>
+<style>
+  body { font-family: Arial, sans-serif; padding: 20px; background: #f5f5f5; }
+  h1 { margin-bottom: 10px; }
+  .box {
+    background: white; padding: 15px; border-radius: 8px;
+    margin-bottom: 20px; border: 1px solid #ccc;
+  }
+  select, input[type=file] { padding: 6px; margin-top: 5px; }
+  button {
+    padding: 10px 16px; background: #2196f3; color: white;
+    border: none; border-radius: 6px; cursor: pointer; margin-top: 10px;
+  }
+  button:hover { background: #1976d2; }
+  .section {
+    background: #fff; padding: 10px; border-radius: 6px;
+    margin-bottom: 15px; border: 1px solid #ccc;
+  }
+  .pair {
+    background: #eef3ff;
+    padding: 10px;
+    margin: 8px 0;
+    border-radius: 6px;
+    border: 1px solid #aac;
+  }
+  .entry {
+    padding: 5px 0;
+  }
+  .label {
+    font-weight: bold;
+    color: #333;
+  }
+</style>
+</head>
+<body>
+
+<h1>GEDCOM Shared Individuals (Linked)</h1>
+
+<div class="box">
+  <h3>Upload GEDCOM Files</h3>
+  <p><strong>File 1:</strong> <input type="file" id="file1"></p>
+  <p><strong>File 2:</strong> <input type="file" id="file2"></p>
+
+  <h3>Comparison style</h3>
+  <select id="compareStyle">
+    <option value="strict">Strict — exact cleaned name + exact dates</option>
+    <option value="flex">Flexible — same cleaned name + one matching date</option>
+    <option value="loose">Loose — similar names + same birth/death year</option>
+    <option value="historical">Historical — very flexible (best for royalty)</option>
+  </select>
+
+  <button onclick="compareFiles()">Compare</button>
+</div>
+
+<div id="results"></div>
+
+<script>
+// ---------- GEDCOM PARSER ----------
+function parseGEDCOM(text) {
+  const lines = text.split(/\r?\n/);
+  const people = [];
+  let current = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    const parts = line.split(" ");
+    const level = parts[0];
+    const tag = parts[1];
+    const data = parts.slice(2).join(" ");
+
+    if (level === "0" && parts.length >= 3 && parts[2] === "INDI") {
+      if (current) people.push(current);
+      current = { rawName: "", name: "", birth: "", death: "" };
+      continue;
+    }
+
+    if (!current) continue;
+
+    if (level === "1" && tag === "NAME") {
+      current.rawName = data;
+      current.name = cleanName(data);
+    }
+
+    if (level === "1" && tag === "BIRT") {
+      const date = findDate(lines, i + 1);
+      if (date) current.birth = date;
+    }
+
+    if (level === "1" && tag === "DEAT") {
+      const date = findDate(lines, i + 1);
+      if (date) current.death = date;
+    }
+  }
+
+  if (current) people.push(current);
+  return people;
+}
+
+function findDate(lines, start) {
+  for (let j = start; j < lines.length; j++) {
+    const l = lines[j].trim();
+    const parts = l.split(" ");
+    if (parts[0] === "1") break;
+    if (parts[0] === "2" && parts[1] === "DATE") return parts.slice(2).join(" ");
+  }
+  return "";
+}
+
+// ---------- NORMALISATION ----------
+function cleanName(name) {
+  return name
+    .toLowerCase()
+    .replace(/[\/(),._-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractYear(date) {
+  const m = date.match(/(\d{4})/);
+  return m ? parseInt(m[1], 10) : NaN;
+}
+
+function similarName(a, b) {
+  const na = cleanName(a);
+  const nb = cleanName(b);
+  if (!na || !nb) return false;
+  return na.includes(nb) || nb.includes(na);
+}
+
+// ---------- MATCHING MODES ----------
+function matchStrict(a, b) {
+  return a.name === b.name &&
+         a.birth === b.birth &&
+         a.death === b.death;
+}
+
+function matchFlex(a, b) {
+  if (a.name !== b.name) return false;
+  return (a.birth && b.birth && a.birth === b.birth) ||
+         (a.death && b.death && a.death === b.death);
+}
+
+function matchLoose(a, b) {
+  if (!similarName(a.rawName, b.rawName)) return false;
+  return extractYear(a.birth) === extractYear(b.birth) ||
+         extractYear(a.death) === extractYear(b.death);
+}
+
+function matchHistorical(a, b) {
+  if (!similarName(a.rawName, b.rawName)) return false;
+
+  const byA = extractYear(a.birth);
+  const byB = extractYear(b.birth);
+  const dyA = extractYear(a.death);
+  const dyB = extractYear(b.death);
+
+  const birthClose = byA && byB && Math.abs(byA - byB) <= 1;
+  const deathClose = dyA && dyB && Math.abs(dyA - dyB) <= 1;
+
+  return birthClose || deathClose;
+}
+
+// ---------- MAIN COMPARISON ----------
+async function compareFiles() {
+  const f1 = document.getElementById("file1").files[0];
+  const f2 = document.getElementById("file2").files[0];
+  const mode = document.getElementById("compareStyle").value;
+
+  if (!f1 || !f2) return alert("Select both files.");
+
+  const text1 = await f1.text();
+  const text2 = await f2.text();
+
+  const list1 = parseGEDCOM(text1);
+  const list2 = parseGEDCOM(text2);
+
+  const matcher =
+    mode === "strict" ? matchStrict :
+    mode === "flex" ? matchFlex :
+    mode === "loose" ? matchLoose :
+    matchHistorical;
+
+  const shared = [];
+  const remaining2 = [...list2];
+
+  for (const p1 of list1) {
+    let found = -1;
+    for (let i = 0; i < remaining2.length; i++) {
+      if (matcher(p1, remaining2[i])) {
+        found = i;
+        break;
+      }
+    }
+    if (found >= 0) {
+      shared.push({ a: p1, b: remaining2[found] });
+      remaining2.splice(found, 1);
+    }
+  }
+
+  showResults(shared);
+}
+
+// ---------- DISPLAY ----------
+function formatPerson(p) {
+  const bits = [];
+  if (p.birth) bits.push("b. " + p.birth);
+  if (p.death) bits.push("d. " + p.death);
+  return `${p.rawName}${bits.length ? " — " + bits.join("  ") : ""}`;
+}
+
+function showResults(shared) {
+  const div = document.getElementById("results");
+
+  if (shared.length === 0) {
+    div.innerHTML = `<div class="section"><p>No shared individuals found.</p></div>`;
+    return;
+  }
+
+  div.innerHTML = `
+    <div class="section">
+      <h3>Shared individuals (${shared.length})</h3>
+      ${shared.map(pair => `
+        <div class="pair">
+          <div class="entry"><span class="label">File 1:</span> ${formatPerson(pair.a)}</div>
+          <div class="entry"><span class="label">File 2:</span> ${formatPerson(pair.b)}</div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+</script>
+
+</body>
+</html>
